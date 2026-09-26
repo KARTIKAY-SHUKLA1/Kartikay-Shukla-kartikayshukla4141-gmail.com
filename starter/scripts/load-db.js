@@ -2,12 +2,13 @@
 // Idempotent: drops and recreates app.db.  Run: npm run db:reset
 
 import { readFileSync, rmSync, existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { openDatabase, newId } from '../server/db.js';
 import { hashPassword } from '../server/auth.js';
 import { readNonce, buildOverlay, applyOverlay, describeOverlay } from './personalise.js';
 
 const DB_FILE = process.env.DATABASE_FILE ?? 'app.db';
-const here = (p) => new URL(p, import.meta.url).pathname;
+const here = (p) => fileURLToPath(new URL(p, import.meta.url));
 
 for (const suffix of ['', '-wal', '-shm']) {
   if (existsSync(DB_FILE + suffix)) rmSync(DB_FILE + suffix);
