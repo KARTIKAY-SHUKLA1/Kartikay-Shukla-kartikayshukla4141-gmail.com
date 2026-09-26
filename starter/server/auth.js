@@ -48,35 +48,89 @@ export function issueAccessToken({ userId, orgId, role, permVersion }, secret) {
 }
 
 // ---------------------------------------------------------------------------
-// TODO — yours to implement.
-//
 // Verify an access token and return its claims, or throw `unauthenticated(...)`.
-// The signing half above is done for you; the verifying half is the exercise.
 //
-// It must reject ALL of the following, each with a 401 UNAUTHENTICATED:
-//
+// It rejects ALL of the following, each with a 401 UNAUTHENTICATED:
 //   1. a token that is not three dot-separated segments
-//   2. a header or payload that is not valid base64url-encoded JSON
+//   2. a header or payload that is not valid base64url-encoded JSON, or not an object
 //   3. a header whose `alg` is anything other than 'HS256', or whose `typ` is not 'JWT'
-//      -- read the header, do NOT trust it. This is the `alg: none` and
-//         algorithm-substitution defence. The constants ALG, ISS and AUD are above.
+//      -- the alg: none and algorithm-substitution defence. We read the header but
+//         NEVER trust it to choose the algorithm — we always enforce ALG ourselves.
 //   4. a signature that does not match, compared in constant time
-//   5. an `exp` that is missing, not a number, or <= now (note: <=, not <)
-//   6. an `iss` or `aud` that is not ours
+//   5. an `exp` that is missing, not a number, or <= now (half-open: exp==now is expired)
+//   6. an `iss` or `aud` that does not match our constants
 //   7. a missing or empty `jti`
-//
-// On success, return the decoded claims object.
 //
 // AUTH-DATA-MODEL.md §10 lists the failure modes; §2 defines the claim set.
 // `node scripts/check-jwt.js` is the public test suite for this function.
 // ---------------------------------------------------------------------------
 export function verifyAccessToken(token, secret) {
-  // YOURS TO WRITE. Every failure mode listed above must be a 401 UNAUTHENTICATED.
-  // `node scripts/check-jwt.js` is the public suite for this function.
-  throw Object.assign(
-    new Error('TODO: server/auth.js — verifyAccessToken() is yours to write (AUTH-DATA-MODEL.md §10).'),
-    { code: 'NOT_IMPLEMENTED' }
-  );
+  // --- Failure mode 1: must be exactly three dot-separated segments -----------
+  // String(token) guards against null/undefined without throwing before we can
+  // produce the right error type.
+  const parts = String(token ?? '').split('.');
+  if (parts.length !== 3) throw unauthenticated('malformed token: expected three segments');
+
+  const [rawHeader, rawPayload, rawSig] = parts;
+
+  // --- Failure mode 2: header and payload must be valid base64url JSON objects -
+  let header, claims;
+  try {
+    const h = JSON.parse(unb64(rawHeader).toString('utf8'));
+    if (h === null || typeof h !== 'object' || Array.isArray(h)) throw new Error();
+    header = h;
+  } catch {
+    throw unauthenticated('malformed token: header is not a JSON object');
+  }
+  try {
+    const p = JSON.parse(unb64(rawPayload).toString('utf8'));
+    if (p === null || typeof p !== 'object' || Array.isArray(p)) throw new Error();
+    claims = p;
+  } catch {
+    throw unauthenticated('malformed token: payload is not a JSON object');
+  }
+
+  // --- Failure mode 3: algorithm and type lock --------------------------------
+  // We decide the algorithm (HS256). We read header.alg only to REJECT anything
+  // that isn't ours. Trusting header.alg to choose the verifier is the classic
+  // alg:none / RS256-confusion attack.
+  if (header.alg !== ALG || header.typ !== 'JWT') {
+    throw unauthenticated('malformed token: unsupported alg or typ');
+  }
+
+  // --- Failure mode 4: signature verification in constant time ----------------
+  // Re-derive what the MAC should be for this header+payload and compare with
+  // timingSafeEqual so an attacker cannot learn the secret from timing differences.
+  // An empty segment ('') produces a zero-length buffer; timingSafeEqual requires
+  // equal lengths, so we handle length mismatch explicitly before calling it.
+  const expectedSig = createHmac('sha256', secret)
+    .update(`${rawHeader}.${rawPayload}`)
+    .digest();
+  const actualSig = unb64(rawSig);
+  if (
+    actualSig.length !== expectedSig.length ||
+    !timingSafeEqual(actualSig, expectedSig)
+  ) {
+    throw unauthenticated('token signature does not match');
+  }
+
+  // --- Failure mode 5: expiry (half-open: exp <= now is already expired) ------
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (typeof claims.exp !== 'number' || claims.exp <= nowSec) {
+    throw unauthenticated('token is expired or missing exp');
+  }
+
+  // --- Failure mode 6: issuer and audience ------------------------------------
+  if (claims.iss !== ISS || claims.aud !== AUD) {
+    throw unauthenticated('token iss or aud does not match');
+  }
+
+  // --- Failure mode 7: jti must be a non-empty string -------------------------
+  if (!claims.jti || typeof claims.jti !== 'string') {
+    throw unauthenticated('token is missing a jti');
+  }
+
+  return claims;
 }
 
 
