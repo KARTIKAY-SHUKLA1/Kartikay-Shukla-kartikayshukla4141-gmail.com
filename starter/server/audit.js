@@ -1,29 +1,63 @@
 // Append-only audit writes.
 //
-// YOURS TO WRITE. This file ships as a stub.
+// audit_events has BEFORE UPDATE / BEFORE DELETE triggers so this module only ever
+// INSERTs — the schema prevents anything else.
 //
-// audit_events has BEFORE UPDATE / BEFORE DELETE triggers, so this module only ever
-// INSERTs. Two things the spec is explicit about (BRIEF.md §4, PERMISSIONS.md §8):
-//
-//   - DENIED attempts are recorded, not just successes. A log that only holds
-//     successes cannot answer "who tried to change what".
-//   - a single action produces a single row. Write the success row inside the same
-//     transaction as the change it describes; do not also log the allow from a wrapper.
-//
-// Schema columns: id, org_id (NOT NULL), actor_id, action, target_type, target_id,
-// result ('allow'|'deny'), reason_code, request_id, at.
+// Two invariants from PERMISSIONS.md §8 / BRIEF.md §4:
+//   - DENIED attempts are recorded, not just successes.
+//   - A single action produces a single row, written inside the same transaction
+//     as the change it describes.
 
-const todo = (name) =>
-  Object.assign(
-    new Error(`TODO: server/audit.js — ${name}() is yours to write (BRIEF.md §3).`),
-    { code: 'NOT_IMPLEMENTED' }
-  );
+import { newId } from './db.js';
+import { forbidden } from './http.js';
 
+// ---------------------------------------------------------------------------
+// audit(): write one audit event row.
+// All fields except org_id and result are optional (nullable in schema).
+// ---------------------------------------------------------------------------
 export function audit(db, { orgId, actorId, action, targetType, targetId, result, reasonCode, requestId }) {
-  throw todo('audit');
+  db.prepare(
+    `INSERT INTO audit_events
+       (id, org_id, actor_id, action, target_type, target_id, result, reason_code, request_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    newId('aud'),
+    orgId,
+    actorId  ?? null,
+    action,
+    targetType ?? null,
+    targetId   ?? null,
+    result,
+    reasonCode ?? null,
+    requestId  ?? null,
+  );
 }
 
-// Run fn(); if it refuses with a permission error, record the denial before rethrowing.
-export function auditDenials(db, ctx, meta, fn) {
-  throw todo('auditDenials');
+// ---------------------------------------------------------------------------
+// auditDenials(): run fn(); if it throws a 403 FORBIDDEN, record the denial
+// in the audit log and rethrow. All other errors propagate unchanged.
+//
+// Usage:
+//   auditDenials(db, ctx, { action: 'session.start', targetType: 'device', targetId: deviceId }, () => {
+//     assertCanStartSession(db, ctx, mode, deviceId);
+//   });
+// ---------------------------------------------------------------------------
+export function auditDenials(db, ctx, { action, targetType, targetId }, fn) {
+  try {
+    return fn();
+  } catch (err) {
+    if (err?.status === 403) {
+      audit(db, {
+        orgId:      ctx.orgId,
+        actorId:    ctx.userId,
+        action,
+        targetType: targetType ?? null,
+        targetId:   targetId   ?? null,
+        result:     'deny',
+        reasonCode: err.reason ?? null,
+        requestId:  ctx.requestId ?? null,
+      });
+    }
+    throw err;
+  }
 }
